@@ -82,6 +82,9 @@ a{color:inherit;text-decoration:none}
 
 /* ---------- 4. LAYOUT / SHELL ---------- */
 #app{display:grid;grid-template-columns:var(--nav-w) 1fr;height:100dvh}
+/* #scrim va fijo y oculto por defecto: así no ocupa una celda del grid en escritorio */
+#scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25;display:none}
+#scrim.on{display:block}
 #nav{display:flex;flex-direction:column;gap:2px;padding:18px 14px;border-right:1px solid var(--line);
   background:var(--glass);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));
   overflow-y:auto;z-index:30}
@@ -101,7 +104,7 @@ a{color:inherit;text-decoration:none}
 .nav-item.active .material-symbols-rounded{font-variation-settings:'FILL' 1}
 .nav-item .badge{margin-left:auto;font:700 11px/1 var(--f-mono);background:var(--fucsia);color:#fff;padding:3px 7px;border-radius:20px}
 .nav-item.active .badge{background:rgba(0,0,0,.25);color:#fff}
-#main{display:flex;flex-direction:column;min-width:0;height:100dvh}
+#main{display:flex;flex-direction:column;min-width:0;height:100dvh;overflow:hidden}
 #top{display:flex;align-items:center;gap:12px;padding:12px 20px;flex:0 0 auto;border-bottom:1px solid var(--line);
   background:var(--glass);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));z-index:20}
 #burger{display:none}
@@ -312,8 +315,6 @@ table.data tbody tr{cursor:pointer}
   #nav{position:fixed;inset:0 auto 0 0;width:min(300px,84vw);transform:translateX(-105%);transition:.28s}
   #nav.open{transform:none;box-shadow:var(--sh-lg)}
   #burger{display:grid}
-  #scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25;display:none}
-  #scrim.on{display:block}
   .kpi-row,.dash-top,.dash-mid,.grid2{grid-template-columns:1fr}
   .view-title{font-size:18px}.search{max-width:none}#stage{padding:14px}
 }
