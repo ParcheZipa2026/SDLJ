@@ -791,6 +791,14 @@ RENDER.dashboard=function(){
      </div>
    </div>
 
+   <div class="card pad" style="margin-bottom:16px">
+     <div class="row-between" style="margin-bottom:2px">
+       <h3 class="h-section" style="margin:0">Gestión por contratista · Hoy</h3>
+       <button class="chip" onclick="switchView('responsables')"><span class="material-symbols-rounded">groups</span> Ver responsables</button>
+     </div>
+     <div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));margin-top:12px">${dashContractors()}</div>
+   </div>
+
    <div class="grid kpi-row" style="margin-bottom:16px">
      ${kpi("celebration","var(--fucsia)",activos,"Eventos activos","")}
      ${kpi("bolt","var(--amarillo)",crit,"Actividades críticas",crit?"Requieren atención":"Sin bloqueos")}
@@ -837,6 +845,42 @@ function alertRow(a){return `<div class="alert-item" style="border-left:4px soli
   <div><h5>${a.h}</h5><p>${esc(a.p)}</p></div></div>`;}
 function emptyMini(t,ico){return `<div class="empty" style="padding:24px"><span class="material-symbols-rounded">${ico}</span>${t}</div>`;}
 function updateBadges(){ $('#nb-plan').textContent=filteredPlan().length; $('#nb-alert').textContent=computeAlerts().length; }
+/* Tarjeta por contratista para el Dashboard: % de gestión + lo que debe hacer hoy
+   (actividades cuya FECHA DE INICIO es hoy y siguen abiertas). */
+function dashContractors(){
+  const t=today();
+  const sameDay=d=>{ const x=parseD(d); return x && x.getFullYear()===t.getFullYear() && x.getMonth()===t.getMonth() && x.getDate()===t.getDate(); };
+  const evF = a => (!STATE.filterEvent || a.Evento===STATE.filterEvent);
+  return STATE.responsables.map(r=>{
+    const acts = STATE.planeacion.filter(a=>a.Responsable===r.Nombre && evF(a));
+    const done = acts.filter(a=>a.Estado==="Finalizado").length;
+    const p = acts.length?Math.round(done/acts.length*100):0;
+    const gColor = p>=66?'var(--neon)':p>=33?'var(--amarillo)':'var(--fucsia)';
+    const hoy = acts.filter(a=>sameDay(a["Fecha inicio"]) && a.Estado!=="Finalizado" && a.Estado!=="Cancelado");
+    const hoyHtml = hoy.length ? hoy.map(a=>`
+      <div onclick="openActivity('${a.ID_ACT}')" style="cursor:pointer;display:flex;gap:8px;align-items:center;background:var(--ink-3);border-left:3px solid ${eventColor(a.Evento)};border-radius:10px;padding:7px 9px;margin-top:6px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.Actividad)}</div>
+          <div style="font:600 9px/1 var(--f-mono);color:var(--txt-mut);margin-top:3px;text-transform:uppercase">${esc(eventName(a.Evento))} · entrega ${a["Fecha fin"]?fmtD(a["Fecha fin"]):'—'}</div>
+        </div>
+        <span style="width:9px;height:9px;border-radius:50%;background:${estadoColor(a.Estado)};flex:0 0 auto" title="${esc(a.Estado||'')}"></span>
+      </div>`).join("")
+      : `<div style="font-size:11px;color:var(--txt-mut);padding:8px 2px">Sin actividades que inicien hoy</div>`;
+    return `<div style="background:var(--glass-2);border:1px solid var(--line);border-radius:16px;padding:14px">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="ava" style="background:${r.Color}">${esc(r.Iniciales)}</span>
+        <div style="flex:1;min-width:0">
+          <b style="font-size:13.5px">${esc(r.Nombre)}</b>
+          <div style="font:700 10px/1 var(--f-mono);color:var(--txt-mut);margin-top:2px">${acts.length} actividades</div>
+        </div>
+        <span style="font-family:var(--f-display);font-size:24px;line-height:1;color:${gColor}" title="Porcentaje de gestión">${p}%</span>
+      </div>
+      <div class="prog" style="height:8px;margin-top:10px"><i style="width:${p}%;background:${r.Color}"></i></div>
+      <div class="eyebrow" style="margin:12px 0 2px;font-size:10px">Para hoy${hoy.length?` · ${hoy.length}`:''}</div>
+      ${hoyHtml}
+    </div>`;
+  }).join("");
+}
 
 /* ---- PLANEACIÓN (Tabla con columnas dinámicas) ---- */
 RENDER.planeacion=function(){
@@ -1100,22 +1144,55 @@ function addEvidence(id,input){
   reader.readAsDataURL(file);
 }
 
-/* ---- RESPONSABLES (carga laboral + indicadores) ---- */
+/* ---- RESPONSABLES (actividades delegadas + fechas + carga) ---- */
 RENDER.responsables=function(){
-  $('#v-responsables').innerHTML=`<div class="people">${STATE.responsables.map(r=>{
-    const acts=STATE.planeacion.filter(a=>a.Responsable===r.Nombre);
-    const done=acts.filter(a=>a.Estado==="Finalizado").length;
-    const p=acts.length?Math.round(done/acts.length*100):0;
-    const maxLoad=Math.max(1,...STATE.responsables.map(x=>STATE.planeacion.filter(a=>a.Responsable===x.Nombre).length));
-    const load=Math.round(acts.length/maxLoad*100);
-    return `<div class="card person">
-      <span class="ava big" style="background:${r.Color}">${esc(r.Iniciales)}</span>
-      <div style="flex:1;min-width:0">
-        <b style="font-size:15px">${esc(r.Nombre)}</b>
-        <div style="font-size:11.5px;color:var(--txt-dim)">${esc(r.Cargo||"")}</div>
-        <div style="font-size:11px;margin-top:6px">${acts.length} actividades · ${p}% cumplido</div>
-        <div class="load" title="Carga laboral"><i style="width:${load}%;background:${load>75?'var(--fucsia)':r.Color}"></i></div>
-      </div></div>`;
+  const evF = a => (!STATE.filterEvent || a.Evento===STATE.filterEvent);
+  const t = today();
+  const maxLoad = Math.max(1, ...STATE.responsables.map(x=>STATE.planeacion.filter(a=>a.Responsable===x.Nombre && evF(a)).length));
+  $('#v-responsables').innerHTML=`
+   <div style="display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(360px,1fr))">${
+    STATE.responsables.map(r=>{
+      // Actividades delegadas a esta persona (ordenadas por fecha de entrega)
+      const acts = STATE.planeacion.filter(a=>a.Responsable===r.Nombre && evF(a))
+        .sort((a,b)=>{ const fa=parseD(a["Fecha fin"]), fb=parseD(b["Fecha fin"]);
+          if(!fa && !fb) return 0; if(!fa) return 1; if(!fb) return -1; return fa-fb; });
+      const done = acts.filter(a=>a.Estado==="Finalizado").length;
+      const pend = acts.filter(a=>a.Estado!=="Finalizado" && a.Estado!=="Cancelado").length;
+      const p = acts.length?Math.round(done/acts.length*100):0;
+      const load = Math.round(acts.length/maxLoad*100);
+
+      const rows = acts.length ? acts.map(a=>{
+        const fin = parseD(a["Fecha fin"]);
+        const late = fin && fin<t && a.Estado!=="Finalizado" && a.Estado!=="Cancelado";
+        return `<div onclick="openActivity('${a.ID_ACT}')" style="cursor:pointer;border-left:3px solid ${eventColor(a.Evento)};
+            background:var(--ink-3);border-radius:12px;padding:10px 12px;margin-top:8px">
+          <div style="display:flex;gap:8px;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;font-size:13px;line-height:1.3">${esc(a.Actividad||'—')}</div>
+              <div style="font:600 10px/1 var(--f-mono);color:var(--txt-mut);margin-top:3px;text-transform:uppercase;letter-spacing:.04em">${esc(eventName(a.Evento))}</div>
+            </div>
+            ${sticker(a.Estado)}
+          </div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11.5px">
+            <span style="color:var(--txt-dim)"><span class="material-symbols-rounded" style="font-size:14px;color:var(--azul)">play_circle</span> Inicio: <b style="font-family:var(--f-mono)">${a["Fecha inicio"]?fmtD(a["Fecha inicio"]):'—'}</b></span>
+            <span style="color:${late?'var(--fucsia)':'var(--txt-dim)'};font-weight:${late?'700':'400'}"><span class="material-symbols-rounded" style="font-size:14px;color:${late?'var(--fucsia)':'var(--neon)'}">flag</span> Entrega: <b style="font-family:var(--f-mono)">${a["Fecha fin"]?fmtD(a["Fecha fin"]):'—'}</b>${late?' · vencida':''}</span>
+          </div>
+        </div>`;
+      }).join("") : `<div style="font-size:12px;color:var(--txt-mut);padding:12px;text-align:center">Sin actividades delegadas${STATE.filterEvent?' en este evento':''}.</div>`;
+
+      return `<div class="card pad">
+        <div style="display:flex;gap:14px;align-items:center">
+          <span class="ava big" style="background:${r.Color}">${esc(r.Iniciales)}</span>
+          <div style="flex:1;min-width:0">
+            <b style="font-size:15px">${esc(r.Nombre)}</b>
+            <div style="font-size:11.5px;color:var(--txt-dim)">${esc(r.Cargo||"")}</div>
+            <div style="font-size:11px;margin-top:6px;color:var(--txt-dim)">${acts.length} delegadas · ${pend} pendientes · ${p}% cumplido</div>
+            <div class="load" title="Carga laboral"><i style="width:${load}%;background:${load>75?'var(--fucsia)':r.Color}"></i></div>
+          </div>
+        </div>
+        <div class="eyebrow" style="margin-top:14px">Actividades delegadas (${acts.length})</div>
+        ${rows}
+      </div>`;
   }).join("")}</div>`;
 };
 
