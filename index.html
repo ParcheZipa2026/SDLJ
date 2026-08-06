@@ -369,6 +369,7 @@ table.data tbody tr{cursor:pointer}
           <select id="evtFilter"><option value="">Todos los eventos</option></select>
         </div>
         <div class="conn demo" id="conn"><span class="dot"></span><span id="connTxt">Demo</span></div>
+        <button class="icon-btn" id="refreshBtn" title="Actualizar datos"><span class="material-symbols-rounded">sync</span></button>
         <button class="icon-btn" id="themeBtn" title="Cambiar tema"><span class="material-symbols-rounded">dark_mode</span></button>
         <button class="btn primary" id="newBtn"><span class="material-symbols-rounded">add</span> Actividad</button>
       </div>
@@ -564,23 +565,54 @@ function filteredPlan(){
    Modo DEMO: usa los datos en memoria (para ver la plataforma sin backend).
    Escrituras: fetch con Content-Type text/plain para evitar preflight CORS
    (patrón estándar de Apps Script Web Apps).                             */
+/* JSONP: carga la respuesta como <script> y evita por completo los bloqueos
+   CORS que impedían leer/escribir en el Web App. Todas las acciones (leer y
+   escribir) pasan por aquí, salvo la subida de evidencias (POST, por tamaño). */
+function jsonp(params){
+  return new Promise((resolve,reject)=>{
+    if(!CONFIG.WEBAPP_URL){ reject(new Error("Sin URL configurada")); return; }
+    const cb='__co'+Date.now()+Math.floor(Math.random()*1e4);
+    const s=document.createElement('script');
+    const usp=new URLSearchParams();
+    Object.keys(params).forEach(k=>usp.append(k, typeof params[k]==='object'?JSON.stringify(params[k]):params[k]));
+    usp.append('callback',cb);
+    let done=false;
+    const cleanup=()=>{ try{delete window[cb];}catch(e){window[cb]=undefined;} if(s.parentNode)s.parentNode.removeChild(s); };
+    window[cb]=data=>{ done=true; cleanup(); resolve(data); };
+    s.onerror=()=>{ if(!done){ cleanup(); reject(new Error("No se pudo conectar (revisa la URL, que el acceso sea 'Cualquiera' y que hayas implementado una versión nueva)")); } };
+    s.src=CONFIG.WEBAPP_URL+'?'+usp.toString();
+    document.body.appendChild(s);
+    setTimeout(()=>{ if(!done){ cleanup(); reject(new Error("Tiempo de espera agotado")); } },20000);
+  });
+}
+const apiGet = params => jsonp(params);
+// Construye un elemento de logística con su checklist (leído de columnas Check_*)
+function mapLogistica(x){
+  const checks=["Llegó","Buen estado","Instalado","Funcionando","Recibido","Conforme"];
+  const checklist={};
+  checks.forEach(c=>{ checklist[c] = String(x['Check_'+c]||'').toUpperCase()==='SI'; });
+  return Object.assign({fotos:[]}, x, {checklist});
+}
+
 const API = {
   async bootstrap(){
     if(!CONFIG.WEBAPP_URL){ this._loadDemo(); STATE.live=false; return; }
     try{
-      const r = await fetch(CONFIG.WEBAPP_URL+"?action=bootstrap",{method:"GET"});
-      const j = await r.json();
-      if(!j.ok) throw new Error(j.error||"respuesta inválida");
+      const j = await apiGet({action:"bootstrap"});
+      if(!j || !j.ok) throw new Error((j&&j.error)||"respuesta inválida");
       STATE.eventos      = j.EVENTOS      || [];
       STATE.responsables = j.RESPONSABLES || [];
       STATE.planeacion   = j.PLANEACION   || [];
-      STATE.logistica    = (j.LOGISTICA||j.PRESUPUESTO||[]).map(x=>({checklist:{},fotos:[],...x}));
+      STATE.logistica    = (j.LOGISTICA||j.PRESUPUESTO||[]).map(mapLogistica);
       STATE.historial    = j.HISTORIAL    || [];
       STATE.comentarios  = j.COMENTARIOS  || [];
-      STATE.live=true;
+      // Adjunta evidencias (URLs de Drive) a cada elemento logístico
+      const evid = j.EVIDENCIAS || [];
+      STATE.logistica.forEach(l=>{ l.fotos = evid.filter(e=>String(e.ID_LOG)===String(l.ID_LOG)).map(e=>e.URL).filter(Boolean).slice(0,5); });
+      STATE.live=true; STATE._warned=false;
     }catch(err){
       console.warn("Bootstrap LIVE falló, usando DEMO:",err);
-      toast("No se pudo conectar con Google Sheets. Mostrando datos demo.","warn");
+      if(!STATE._warned){ toast("No se pudo conectar con Sheets: "+err.message,"err"); STATE._warned=true; }
       this._loadDemo(); STATE.live=false;
     }
     this._detectColumns();
@@ -597,42 +629,61 @@ const API = {
   // Detecta columnas de PLANEACION automáticamente (requisito del PRD)
   _detectColumns(){
     const cols=new Set();
-    STATE.planeacion.forEach(r=>Object.keys(r).forEach(k=>{ if(!["checklist","fotos"].includes(k)) cols.add(k); }));
+    const hidden=["checklist","fotos","ID_CAL","DriveURL"];
+    STATE.planeacion.forEach(r=>Object.keys(r).forEach(k=>{ if(!hidden.includes(k) && !k.startsWith("Check_")) cols.add(k); }));
     // Orden preferido; las columnas nuevas se agregan al final automáticamente
     const pref=["ID_ACT","Fase","Evento","Fecha evento","Actividad","Tipo","Fecha inicio","Fecha fin","Actores","Evidencia","Observaciones","Responsable","Insumos","Estado"];
     STATE.planColumns=[...pref.filter(c=>cols.has(c)), ...[...cols].filter(c=>!pref.includes(c))];
   },
   // Escribe un cambio de campo (y registra en HISTORIAL)
   async saveField(sheet,idField,idValue,field,value){
-    // update local
     const arr = sheet==="PLANEACION"?STATE.planeacion:sheet==="LOGISTICA"?STATE.logistica:sheet==="EVENTOS"?STATE.eventos:[];
     const row = arr.find(x=>x[idField]===idValue);
     const prev = row? row[field] : "";
     if(row) row[field]=value;
     logHist(field+" ("+idValue+")",prev,value);
     if(!STATE.live) return true;
-    return this._post({action:"update",sheet,idField,idValue,field,value});
+    try{ const r=await apiGet({action:"update",sheet,idField,idValue,field,value:String(value)});
+      if(r && !r.ok) toast("No se guardó: "+r.error,"err"); return r && r.ok; }
+    catch(e){ toast("Error al guardar: "+e.message,"err"); return false; }
   },
   async createActivity(obj){
     obj.ID_ACT = obj.ID_ACT || ("A"+String(Date.now()).slice(-5));
     STATE.planeacion.push(obj); this._detectColumns();
     logHist("Nueva actividad ("+obj.ID_ACT+")","","creada");
-    if(STATE.live) await this._post({action:"create",sheet:"PLANEACION",row:obj});
+    if(STATE.live){ try{ await apiGet({action:"create",sheet:"PLANEACION",row:obj}); }
+      catch(e){ toast("Error al crear: "+e.message,"err"); } }
     return obj;
+  },
+  async deleteActivity(id){
+    STATE.planeacion = STATE.planeacion.filter(a=>a.ID_ACT!==id);
+    this._detectColumns();
+    logHist("Actividad eliminada ("+id+")","","eliminada");
+    if(STATE.live){ try{ await apiGet({action:"delete",sheet:"PLANEACION",idField:"ID_ACT",idValue:id}); }
+      catch(e){ toast("Error al eliminar: "+e.message,"err"); } }
   },
   async addComment(idAct,texto){
     const c={ID_ACT:idAct,Usuario:"Julieth",Fecha:new Date().toISOString().slice(0,16).replace('T',' '),Texto:texto};
     STATE.comentarios.push(c);
-    if(STATE.live) await this._post({action:"comment",row:c});
+    if(STATE.live){ try{ await apiGet({action:"comment",row:c}); }catch(e){ toast("Error al comentar: "+e.message,"err"); } }
     return c;
   },
+  async syncCalendar(){
+    if(!STATE.live){ toast("Disponible en modo LIVE","warn"); return; }
+    toast("Sincronizando con Google Calendar…");
+    try{ const r=await apiGet({action:"syncCalendar"});
+      if(r && r.ok) toast("Calendario: "+r.sincronizadas+" actividades"+(r.errores?(" · "+r.errores+" con error"):"")+" ✅");
+      else toast("No se sincronizó"+(r&&r.detalle?": "+r.detalle:""),"err"); }
+    catch(e){ toast("Error: "+e.message,"err"); }
+  },
+  // Subida de evidencias: POST por el tamaño del archivo (base64)
   async _post(payload){
     try{
-      await fetch(CONFIG.WEBAPP_URL,{method:"POST",
+      await fetch(CONFIG.WEBAPP_URL,{method:"POST",mode:"no-cors",
         headers:{"Content-Type":"text/plain;charset=utf-8"},
         body:JSON.stringify(payload)});
       return true;
-    }catch(e){ toast("Error al guardar en Sheets: "+e.message,"err"); return false; }
+    }catch(e){ toast("Error al subir: "+e.message,"err"); return false; }
   }
 };
 function logHist(campo,ant,nue){
@@ -838,9 +889,10 @@ let _dragId=null;
 function dragCard(e,id){_dragId=id;e.target.classList.add('drag');}
 async function dropCard(e,estado){
   e.preventDefault(); if(!_dragId) return;
-  await API.saveField("PLANEACION","ID_ACT",_dragId,"Estado",estado);
-  toast("Estado → "+estado); _dragId=null; RENDER.kanban();
-  if(STATE.view==="dashboard") RENDER.dashboard();
+  const id=_dragId; _dragId=null;
+  await API.saveField("PLANEACION","ID_ACT",id,"Estado",estado);
+  toast("Estado → "+estado);
+  if(STATE.live) await refresh(); else RENDER.kanban();
 }
 
 /* ---- CALENDARIO (mes) ---- */
@@ -972,9 +1024,24 @@ RENDER.eventos=function(){
     </div>
     <div class="people">${cards}</div>`;
 };
-function driveFolder(id){
-  const e=eventById(id);
-  toast(STATE.live?"Abriendo carpeta de Drive de "+e.Nombre:"En modo LIVE se abre la carpeta de Drive de "+e.Nombre, STATE.live?"":"warn");
+async function driveFolder(id){
+  const e=eventById(id); if(!e) return;
+  if(!STATE.live){ toast("En modo LIVE se abre la carpeta de Drive de "+e.Nombre,"warn"); return; }
+  const w=window.open('about:blank','_blank');           // abre pestaña ya (evita bloqueo de popups)
+  toast("Abriendo carpeta de Drive…");
+  try{
+    const r=await apiGet({action:"folder",idEvento:id});
+    if(r && r.url){ if(w) w.location=r.url; else window.location=r.url; }
+    else { if(w) w.close(); toast("No se pudo abrir la carpeta"+(r&&r.error?": "+r.error:""),"err"); }
+  }catch(err){ if(w) w.close(); toast("Error: "+err.message,"err"); }
+}
+// Recarga datos desde Google Sheets y repinta (usado tras cada cambio y por el botón Actualizar)
+async function refresh(){
+  await API.bootstrap();
+  populateEventFilter();
+  render(STATE.view);
+  const conn=$('#conn'), ct=$('#connTxt');
+  if(conn){ conn.className='conn '+(STATE.live?'live':'demo'); ct.textContent=STATE.live?'Live':'Demo'; }
 }
 
 /* ---- LOGÍSTICA (verificación de entrega + checklist + evidencias) ---- */
@@ -999,7 +1066,10 @@ RENDER.logistica=function(){
           <div class="checks">${checks.map(c=>`<span class="ck ${l.checklist[c]?'on':''}" onclick="toggleCheck('${l.ID_LOG}','${c}')"><span class="material-symbols-rounded" style="font-size:15px">${l.checklist[c]?'check_circle':'radio_button_unchecked'}</span>${c}</span>`).join("")}
             <span style="margin-left:auto;font:700 11px/1 var(--f-mono);color:var(--txt-mut);align-self:center">${okChecks}/6</span></div>
           <div class="gallery">
-            ${(l.fotos||[]).slice(0,5).map((f,i)=>`<div class="ph"><img src="${f}" alt="evidencia ${i+1}"></div>`).join("")}
+            ${(l.fotos||[]).slice(0,5).map((f,i)=> String(f).startsWith('data:')
+              ? `<div class="ph"><img src="${f}" alt="evidencia ${i+1}"></div>`
+              : `<a class="ph" href="${f}" target="_blank" rel="noopener" title="Ver evidencia en Drive"><span class="material-symbols-rounded">image</span></a>`
+            ).join("")}
             ${(l.fotos||[]).length<5?`<label class="ph add" title="Máx 5 fotos"><span class="material-symbols-rounded">add_a_photo</span><input type="file" accept="image/*" hidden onchange="addEvidence('${l.ID_LOG}',this)"></label>`:""}
           </div>
           ${l.Observaciones?`<div style="font-size:12px;color:var(--txt-dim);margin-top:10px"><b>Obs:</b> ${esc(l.Observaciones)}</div>`:""}
@@ -1013,7 +1083,7 @@ function toggleCheck(id,c){
   const all=["Llegó","Buen estado","Instalado","Funcionando","Recibido","Conforme"].every(k=>l.checklist[k]);
   if(all){l.Estado="Recibido";} 
   logHist("Checklist "+c+" ("+id+")",!l.checklist[c],l.checklist[c]);
-  if(STATE.live) API._post({action:"logcheck",idField:"ID_LOG",idValue:id,field:c,value:l.checklist[c]});
+  if(STATE.live) apiGet({action:"logcheck",idField:"ID_LOG",idValue:id,field:c,value:l.checklist[c]?"1":""}).catch(()=>{});
   RENDER.logistica();
 }
 function addEvidence(id,input){
@@ -1154,12 +1224,22 @@ RENDER.config=function(){
       <h3 class="h-section" style="margin-top:6px">Backend</h3>
       <div class="field"><label>URL del Web App (Apps Script · /exec)</label>
         <input id="cfgUrl" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(CONFIG.WEBAPP_URL)}"></div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn primary" onclick="saveWebapp()"><span class="material-symbols-rounded">link</span> Conectar</button>
         <button class="btn ghost" onclick="testConn()">Probar</button>
+        <button class="btn ghost" onclick="refresh()"><span class="material-symbols-rounded">sync</span> Actualizar datos</button>
         <button class="btn ghost" onclick="CONFIG.WEBAPP_URL='';_LS.del('co_webapp');toast('Modo demo');boot()">Modo demo</button>
       </div>
       <p style="font-size:12px;color:var(--txt-dim);margin-top:12px">Estado: <b style="color:${STATE.live?'var(--neon)':'var(--amarillo)'}">${STATE.live?'LIVE — conectado a Sheets':'DEMO — datos de ejemplo'}</b></p>
+    </div>
+    <div class="card pad">
+      <div class="eyebrow">Google Calendar</div>
+      <h3 class="h-section" style="margin-top:6px">Sincronización</h3>
+      <p style="font-size:12px;color:var(--txt-dim);margin-bottom:12px">Crea o actualiza en tu calendario un evento por cada actividad con fechas. Vuelve a ejecutarlo cuando agregues o cambies actividades.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn pink" onclick="API.syncCalendar()"><span class="material-symbols-rounded">event_available</span> Sincronizar calendario</button>
+        <button class="btn ghost" onclick="testCal()"><span class="material-symbols-rounded">check</span> Probar acceso</button>
+      </div>
     </div>
     <div class="card pad">
       <div class="eyebrow">Hojas del libro</div>
@@ -1186,9 +1266,15 @@ RENDER.config=function(){
 function saveWebapp(){ const u=$('#cfgUrl').value.trim(); CONFIG.WEBAPP_URL=u;
   if(u) _LS.set('co_webapp',u); else _LS.del('co_webapp');
   toast(u?"Conectando…":"URL vacía",u?"":"warn"); boot(); }
-async function testConn(){ if(!$('#cfgUrl').value.trim()){toast("Ingresa la URL","warn");return;}
-  try{const r=await fetch($('#cfgUrl').value.trim()+"?action=ping");const j=await r.json();
-    toast(j.ok?"Conexión OK ✅":"Respuesta inesperada",j.ok?"":"err");}catch(e){toast("No responde: "+e.message,"err");} }
+async function testConn(){ const u=$('#cfgUrl').value.trim(); if(!u){toast("Ingresa la URL","warn");return;}
+  const prev=CONFIG.WEBAPP_URL; CONFIG.WEBAPP_URL=u;
+  try{ const j=await apiGet({action:"ping"}); toast(j&&j.ok?"Conexión OK ✅":"Respuesta inesperada",j&&j.ok?"":"err"); }
+  catch(e){ toast("No responde: "+e.message,"err"); }
+  finally{ CONFIG.WEBAPP_URL=prev; } }
+async function testCal(){ if(!STATE.live){toast("Primero conéctate (modo LIVE)","warn");return;}
+  try{ const r=await apiGet({action:"testCalendar"});
+    toast(r&&r.ok?("Calendario OK: "+r.calendario+" ✅"):("Sin acceso al calendario"+(r&&r.error?": "+r.error:"")), r&&r.ok?"":"err"); }
+  catch(e){ toast("Error: "+e.message,"err"); } }
 function exportData(fmt){
   const rows=filteredPlan(), cols=STATE.planColumns;
   if(fmt==='excel'){
@@ -1226,9 +1312,10 @@ function openActivity(id){
       <div class="field"><label>Fecha fin</label><input type="date" id="m-ff" value="${a["Fecha fin"]||''}"></div>
     </div>
     <div class="field"><label>Observaciones</label><textarea id="m-obs">${esc(a.Observaciones||'')}</textarea></div>
-    <div style="display:flex;gap:8px;margin-bottom:18px">
+    <div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap">
       <button class="btn primary" onclick="saveActivity('${id||''}')"><span class="material-symbols-rounded">save</span> ${isNew?'Crear':'Guardar'}</button>
       ${!isNew?`<button class="btn ghost" onclick="driveFolder('${a.Evento}')"><span class="material-symbols-rounded">folder_open</span> Drive</button>`:''}
+      ${!isNew?`<button class="btn ghost" style="margin-left:auto;color:var(--fucsia);border-color:var(--fucsia)" onclick="removeActivity('${id}')"><span class="material-symbols-rounded">delete</span> Eliminar</button>`:''}
     </div>
     ${!isNew?`
     <div class="eyebrow" style="margin-bottom:10px">Comentarios y menciones</div>
@@ -1253,7 +1340,16 @@ async function saveActivity(id){
     toast("Actividad actualizada");
   }else{ data["Fecha evento"]=(eventById(data.Evento)||{}).Fecha||"";
     await API.createActivity(data); toast("Actividad creada"); }
-  $('#overlay').classList.remove('open'); render(STATE.view);
+  $('#overlay').classList.remove('open');
+  if(STATE.live) await refresh(); else render(STATE.view);
+}
+async function removeActivity(id){
+  const a=STATE.planeacion.find(x=>x.ID_ACT===id);
+  if(!confirm("¿Eliminar la actividad \""+((a&&a.Actividad)||id)+"\"? Esta acción no se puede deshacer.")) return;
+  await API.deleteActivity(id);
+  toast("Actividad eliminada");
+  $('#overlay').classList.remove('open');
+  if(STATE.live) await refresh(); else render(STATE.view);
 }
 async function sendComment(id){
   const inp=$('#m-cmt'); const v=inp.value.trim(); if(!v)return;
@@ -1288,13 +1384,15 @@ async function boot(){
   populateEventFilter();
   render(STATE.view);
   $('#boot').style.display='none';
-  // Auto-sync en LIVE
-  if(STATE.live){ clearInterval(window._sync); window._sync=setInterval(async()=>{await API.bootstrap();populateEventFilter();render(STATE.view);},CONFIG.REFRESH_MS); }
+  // Auto-sync en LIVE (refresca datos e indicador periódicamente)
+  clearInterval(window._sync);
+  if(STATE.live){ window._sync=setInterval(()=>{ if(!$('#overlay').classList.contains('open')) refresh(); },CONFIG.REFRESH_MS); }
 }
 function wire(){
   $$('.nav-item').forEach(b=>b.addEventListener('click',()=>switchView(b.dataset.view)));
   $('#burger').addEventListener('click',()=>{$('#nav').classList.toggle('open');$('#scrim').classList.toggle('on');});
   $('#scrim').addEventListener('click',()=>{$('#nav').classList.remove('open');$('#scrim').classList.remove('on');});
+  $('#refreshBtn').addEventListener('click',()=>{ const b=$('#refreshBtn .material-symbols-rounded'); b.style.animation='spin 1s linear'; refresh().finally(()=>setTimeout(()=>b.style.animation='',600)); });
   $('#themeBtn').addEventListener('click',()=>setTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark'));
   $('#modalClose').addEventListener('click',()=>$('#overlay').classList.remove('open'));
   $('#overlay').addEventListener('click',e=>{if(e.target.id==='overlay')$('#overlay').classList.remove('open');});
